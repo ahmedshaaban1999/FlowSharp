@@ -1,24 +1,7 @@
-﻿/* The MIT License (MIT)
-* 
-* Copyright (c) 2016 Marc Clifton
-* 
-* Permission is hereby granted, free of charge, to any person obtaining a copy
-* of this software and associated documentation files (the "Software"), to deal
-* in the Software without restriction, including without limitation the rights
-* to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-* copies of the Software, and to permit persons to whom the Software is
-* furnished to do so, subject to the following conditions:
-* 
-* The above copyright notice and this permission notice shall be included in all
-* copies or substantial portions of the Software.
-* 
-* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-* AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-* OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-* SOFTWARE.
+﻿/* 
+* Copyright (c) Marc Clifton
+* The Code Project Open License (CPOL) 1.02
+* http://www.codeproject.com/info/cpol10.aspx
 */
 
 using System;
@@ -26,12 +9,20 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Xml.Serialization;
 
+using Clifton.Core.ExtensionMethods;
+
 namespace FlowSharpLib
 {
-	public class ConnectionPropertyBag
+    public class ChildPropertyBag
+    {
+        public Guid ChildId { get; set; }
+    }
+
+    public class ConnectionPropertyBag
 	{
 		public Guid ToElementId { get; set; }
 		public ConnectionPoint ToConnectionPoint { get; set; }
@@ -44,14 +35,20 @@ namespace FlowSharpLib
 		[XmlIgnore]
 		public GraphicElement Element { get; set; }
 
-		[XmlAttribute]
+        [XmlAttribute]
+        public string Name { get; set; }
+        [XmlAttribute]
 		public string ElementName { get; set; }
 		[XmlAttribute]
 		public Guid Id { get; set; }
-		[XmlAttribute]
+        [XmlAttribute]
+        public bool Visible { get; set; }
+        [XmlAttribute]
 		public string Text { get; set; }
+        [XmlAttribute]
+        public bool IsBookmarked { get; set; }
 
-		public Rectangle DisplayRectangle { get; set; }
+        public Rectangle DisplayRectangle { get; set; }
 		public Point StartPoint { get; set; }
 		public Point EndPoint { get; set; }
 
@@ -86,8 +83,18 @@ namespace FlowSharpLib
 		public bool TextFontUnderline { get; set; }
 		public bool TextFontStrikeout { get; set; }
 		public bool TextFontItalic { get; set; }
+        public bool TextFontBold { get; set; }
+
+        // TODO: Deprecated with the addition of the JSON string?
+        public string ExtraData { get; set; }
+
+        public string Json { get; set; }
 
 		public List<ConnectionPropertyBag> Connections { get; set; }
+        public List<ChildPropertyBag> Children { get; set; }
+
+        public ContentAlignment TextAlign { get; set; }
+        public bool Multiline { get; set; }
 
 		[XmlIgnore]
 		public Color TextColor { get; set; }
@@ -119,18 +126,23 @@ namespace FlowSharpLib
 		public ElementPropertyBag()
 		{
 			Connections = new List<ConnectionPropertyBag>();
+            Children = new List<ChildPropertyBag>();
+            Visible = true;     // Default, if not defined, for older fsd's that don't have this property.
 		}
 	}
 
 	public static class Persist
 	{
-		public static string Serialize(List<GraphicElement> elements)
+        public static Func<AssemblyName, Assembly> AssemblyResolver { get; set; }
+        public static Func<Assembly, string, bool, Type> TypeResolver { get; set; }
+
+		public static string Serialize(IEnumerable<GraphicElement> elements)
 		{
 			List<ElementPropertyBag> sps = new List<ElementPropertyBag>();
 			elements.ForEach(el =>
 			{
 				ElementPropertyBag epb = new ElementPropertyBag();
-				el.Serialize(epb);
+				el.Serialize(epb, elements);
 				sps.Add(epb);
 			});
 
@@ -142,10 +154,11 @@ namespace FlowSharpLib
 			return sb.ToString();
 		}
 
+        /*
 		public static string Serialize(GraphicElement el)
 		{
 			ElementPropertyBag epb = new ElementPropertyBag();
-			el.Serialize(epb);
+			el.Serialize(epb, new List<GraphicElement>() { el });
 			XmlSerializer xs = new XmlSerializer(typeof(ElementPropertyBag));
 			StringBuilder sb = new StringBuilder();
 			TextWriter tw = new StringWriter(sb);
@@ -153,17 +166,38 @@ namespace FlowSharpLib
 
 			return sb.ToString();
 		}
+        */
 
+        /// <summary>
+        /// Remap is false when loading from a file, true when copying and pasting.
+        /// </summary>
 		public static List<GraphicElement> Deserialize(Canvas canvas, string data)
 		{
-            Tuple<List<GraphicElement>, List<ElementPropertyBag>> collections = InternalDeserialize(canvas, data);
-            FixupConnections(collections);
-            FinalFixup(collections);
+            Dictionary<Guid, Guid> oldNewIdMap = new Dictionary<Guid, Guid>();
+            Tuple<List<GraphicElement>, List<ElementPropertyBag>> collections = InternalDeserialize(canvas, data, oldNewIdMap);
+            FixupConnections(collections, oldNewIdMap);
+            FixupChildren(collections, oldNewIdMap);
+            FinalFixup(collections, oldNewIdMap);
 
             return collections.Item1;
 		}
 
-        private static Tuple<List<GraphicElement>, List<ElementPropertyBag>> InternalDeserialize(Canvas canvas, string data)
+        /*
+        public static GraphicElement DeserializeElement(Canvas canvas, string data)
+        {
+            XmlSerializer xs = new XmlSerializer(typeof(ElementPropertyBag));
+            TextReader tr = new StringReader(data);
+            ElementPropertyBag epb = (ElementPropertyBag)xs.Deserialize(tr);
+            Type t = Type.GetType(epb.ElementName);
+            GraphicElement el = (GraphicElement)Activator.CreateInstance(t, new object[] { canvas });
+            el.Deserialize(epb);        // A specific deserialization does not preserve connections.
+            el.Id = Guid.NewGuid();     // We get a new GUID when deserializing a specific element.
+
+            return el;
+        }
+        */
+
+        private static Tuple<List<GraphicElement>, List<ElementPropertyBag>> InternalDeserialize(Canvas canvas, string data, Dictionary<Guid, Guid> oldNewIdMap)
         {
             List<GraphicElement> elements = new List<GraphicElement>();
             XmlSerializer xs = new XmlSerializer(typeof(List<ElementPropertyBag>));
@@ -172,9 +206,13 @@ namespace FlowSharpLib
 
             foreach (ElementPropertyBag epb in sps)
             {
-                Type t = Type.GetType(epb.ElementName);
+                Type t = Type.GetType(epb.ElementName, AssemblyResolver, TypeResolver);
                 GraphicElement el = (GraphicElement)Activator.CreateInstance(t, new object[] { canvas });
                 el.Deserialize(epb);
+                Guid elGuid = el.Id;
+                elGuid = Guid.NewGuid();
+                oldNewIdMap[el.Id] = elGuid;
+                el.Id = elGuid;
                 elements.Add(el);
                 epb.Element = el;
             }
@@ -182,36 +220,39 @@ namespace FlowSharpLib
             return new Tuple<List<GraphicElement>, List<ElementPropertyBag>>(elements, sps);
         }
 
-        private static void FixupConnections(Tuple<List<GraphicElement>, List<ElementPropertyBag>> collections)
+        private static void FixupConnections(Tuple<List<GraphicElement>, List<ElementPropertyBag>> collections, Dictionary<Guid, Guid> oldNewGuidMap)
         {
-            // Fixup Connection
             foreach (ElementPropertyBag epb in collections.Item2)
             {
                 epb.Connections.Where(c => c.ToElementId != Guid.Empty).ForEach(c =>
                 {
                     Connection conn = new Connection();
-                    conn.Deserialize(collections.Item1, c);
+                    conn.Deserialize(collections.Item1, c, oldNewGuidMap);
                     epb.Element.Connections.Add(conn);
                 });
             }
         }
 
-        private static void FinalFixup(Tuple<List<GraphicElement>, List<ElementPropertyBag>> collections)
+        private static void FixupChildren(Tuple<List<GraphicElement>, List<ElementPropertyBag>> collections, Dictionary<Guid, Guid> oldNewGuidMap)
         {
-            collections.Item2.ForEach(epb => epb.Element.FinalFixup(collections.Item1, epb));
+            List<GraphicElement> elements = collections.Item1;
+
+            foreach (ElementPropertyBag epb in collections.Item2)
+            {
+                GraphicElement el = elements.Single(e => e.Id == oldNewGuidMap[epb.Id]);
+
+                foreach (ChildPropertyBag cpb in epb.Children)
+                {
+                    GraphicElement child = elements.Single(e => e.Id == oldNewGuidMap[cpb.ChildId]);
+                    el.GroupChildren.Add(child);
+                    child.Parent = el;
+                }
+            }
         }
 
-        public static GraphicElement DeserializeElement(Canvas canvas, string data)
-		{
-			XmlSerializer xs = new XmlSerializer(typeof(ElementPropertyBag));
-			TextReader tr = new StringReader(data);
-			ElementPropertyBag epb = (ElementPropertyBag)xs.Deserialize(tr);
-			Type t = Type.GetType(epb.ElementName);
-			GraphicElement el = (GraphicElement)Activator.CreateInstance(t, new object[] { canvas });
-			el.Deserialize(epb);        // A specific deserialization does not preserve connections.
-            el.Id = Guid.NewGuid();     // We get a new GUID when deserializing a specific element.
-
-            return el;
-		}
+        private static void FinalFixup(Tuple<List<GraphicElement>, List<ElementPropertyBag>> collections, Dictionary<Guid, Guid> oldNewGuidMap)
+        {
+            collections.Item2.ForEach(epb => epb.Element.FinalFixup(collections.Item1, epb, oldNewGuidMap));
+        }
 	}
 }

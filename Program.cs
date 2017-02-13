@@ -1,22 +1,36 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
+﻿/* 
+* Copyright (c) Marc Clifton
+* The Code Project Open License (CPOL) 1.02
+* http://www.codeproject.com/info/cpol10.aspx
+*/
+
+using System;
+using System.Drawing;
 using System.Windows.Forms;
+
+using FlowSharpServiceInterfaces;
 
 namespace FlowSharp
 {
-    static class Program
+    static partial class Program
     {
-        /// <summary>
-        /// The main entry point for the application.
-        /// </summary>
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
+            string modules = "modules.xml";
+
+            if (args.Length == 1)
+            {
+                modules = args[0];
+            }
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new FlowSharpUI());
+            Bootstrap(modules);
+            Icon icon = Properties.Resources.FlowSharp;
+            Form form = ServiceManager.Get<IFlowSharpService>().CreateDockingForm(icon);
+            Application.Run(form);
         }
     }
 }
+
