@@ -9,7 +9,7 @@ namespace FlowSharp
 		protected CanvasController canvasController;
 		protected ElementProperties elementProperties;
 		protected PropertyGrid pgElement;
-
+        
 		public UIController(PropertyGrid pgElement, CanvasController canvasController)
 		{
 			this.pgElement = pgElement;
